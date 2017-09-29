@@ -16,6 +16,7 @@ using System.Threading.Tasks;
 using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Net;
+using NuGet;
 
 namespace Squirrel
 {
@@ -31,17 +32,13 @@ namespace Squirrel
         {
             byte[] output = { };
 
-            if (content == null)
-            {
+            if (content == null) {
                 goto done;
             }
 
-            Func<byte[], byte[], bool> matches = (bom, src) =>
-            {
-                if (src.Length < bom.Length)
-                {
-                    return false;
-                }
+            Func<byte[], byte[], bool> matches = (bom, src) => {
+                if (src.Length < bom.Length) return false;
+
                 return !bom.Where((chr, index) => src[index] != chr).Any();
             };
 
@@ -51,36 +48,25 @@ namespace Squirrel
             var utf16Le = new byte[] { 0xFF, 0xFE };
             var utf8 = new byte[] { 0xEF, 0xBB, 0xBF };
 
-            if (matches(utf32Be, content))
-            {
+            if (matches(utf32Be, content)) {
                 output = new byte[content.Length - utf32Be.Length];
-            }
-            else if (matches(utf32Le, content))
-            {
+            } else if (matches(utf32Le, content)) {
                 output = new byte[content.Length - utf32Le.Length];
-            }
-            else if (matches(utf16Be, content))
-            {
+            } else if (matches(utf16Be, content)) {
                 output = new byte[content.Length - utf16Be.Length];
-            }
-            else if (matches(utf16Le, content))
-            {
+            } else if (matches(utf16Le, content)) {
                 output = new byte[content.Length - utf16Le.Length];
-            }
-            else if (matches(utf8, content))
-            {
+            } else if (matches(utf8, content)) {
                 output = new byte[content.Length - utf8.Length];
-            }
-            else
-            {
+            } else {
                 output = content;
             }
 
         done:
-            if (output.Length > 0)
-            {
+            if (output.Length > 0) {
                 Buffer.BlockCopy(content, content.Length - output.Length, output, 0, output.Length);
             }
+
             return Encoding.UTF8.GetString(output);
         }
 
@@ -119,6 +105,8 @@ namespace Squirrel
         public static WebClient CreateWebClient()
         {
             // WHY DOESNT IT JUST DO THISSSSSSSS
+            System.Net.ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12 | SecurityProtocolType.Tls11 | SecurityProtocolType.Tls;
+
             var ret = new WebClient();
             var wp = WebRequest.DefaultWebProxy;
             if (wp != null) {
@@ -176,15 +164,20 @@ namespace Squirrel
             }
         }
 
-        public static Task<Tuple<int, string>> InvokeProcessAsync(string fileName, string arguments, CancellationToken ct)
+        public static Task<Tuple<int, string>> InvokeProcessAsync(string fileName, string arguments, CancellationToken ct, string workingDirectory = "")
         {
             var psi = new ProcessStartInfo(fileName, arguments);
+            if (Environment.OSVersion.Platform != PlatformID.Win32NT && fileName.EndsWith (".exe", StringComparison.OrdinalIgnoreCase)) {
+                psi = new ProcessStartInfo("wine", fileName + " " + arguments);
+            }
+
             psi.UseShellExecute = false;
             psi.WindowStyle = ProcessWindowStyle.Hidden;
             psi.ErrorDialog = false;
             psi.CreateNoWindow = true;
             psi.RedirectStandardOutput = true;
             psi.RedirectStandardError = true;
+            psi.WorkingDirectory = workingDirectory;
 
             return InvokeProcessAsync(psi, ct);
         }
@@ -204,12 +197,14 @@ namespace Squirrel
             });
 
             string textResult = await pi.StandardOutput.ReadToEndAsync();
-            if (String.IsNullOrWhiteSpace(textResult)) {
-                textResult = await pi.StandardError.ReadToEndAsync();
+            if (String.IsNullOrWhiteSpace(textResult) || pi.ExitCode != 0) {
+                textResult = (textResult ?? "") + "\n" + await pi.StandardError.ReadToEndAsync();
+
                 if (String.IsNullOrWhiteSpace(textResult)) {
                     textResult = String.Empty;
                 }
             }
+
             return Tuple.Create(pi.ExitCode, textResult.Trim());
         }
 
@@ -346,9 +341,82 @@ namespace Squirrel
             }
         }
 
+        public static string FindHelperExecutable(string toFind, IEnumerable<string> additionalDirs = null)
+        {
+            additionalDirs = additionalDirs ?? Enumerable.Empty<string>();
+            var dirs = (new[] { Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location) })
+                .Concat(additionalDirs ?? Enumerable.Empty<string>());
+
+            var exe = @".\" + toFind;
+            return dirs
+                .Select(x => Path.Combine(x, toFind))
+                .FirstOrDefault(x => File.Exists(x)) ?? exe;
+        }
+
+        static string find7Zip()
+        {
+            if (ModeDetector.InUnitTestRunner()) {
+                var vendorDir = Path.Combine(
+                    Path.GetDirectoryName(Assembly.GetExecutingAssembly().CodeBase.Replace("file:///", "")),
+                    "..", "..", "..",
+                    "vendor", "7zip"
+                );
+                return FindHelperExecutable("7z.exe", new[] { vendorDir });
+            } else {
+                return FindHelperExecutable("7z.exe");
+            }
+        }
+
+        public static async Task ExtractZipToDirectory(string zipFilePath, string outFolder)
+        {
+            var sevenZip = find7Zip();
+            var result = default(Tuple<int, string>);
+
+            try {
+                var cmd = sevenZip;
+                var args = String.Format("x \"{0}\" -tzip -mmt on -aoa -y -o\"{1}\" *", zipFilePath, outFolder);
+                if (Environment.OSVersion.Platform != PlatformID.Win32NT) {
+                    cmd = "wine";
+                    args = sevenZip + " " + args;
+                }
+
+                result = await Utility.InvokeProcessAsync(cmd, args, CancellationToken.None);
+                if (result.Item1 != 0) throw new Exception(result.Item2);
+            } catch (Exception ex) {
+                Log().Error($"Failed to extract file {zipFilePath} to {outFolder}\n{ex.Message}");
+                throw;
+            }
+        }
+
+        public static async Task CreateZipFromDirectory(string zipFilePath, string inFolder)
+        {
+            var sevenZip = find7Zip();
+            var result = default(Tuple<int, string>);
+
+            try {
+                var cmd = sevenZip;
+                var args = String.Format("a \"{0}\" -tzip -aoa -y -mmt on *", zipFilePath);
+                if (Environment.OSVersion.Platform != PlatformID.Win32NT) {
+                    cmd = "wine";
+                    args = sevenZip + " " + args;
+                }
+
+                result = await Utility.InvokeProcessAsync(cmd, args, CancellationToken.None, inFolder);
+                if (result.Item1 != 0) throw new Exception(result.Item2);
+            } catch (Exception ex) {
+                Log().Error($"Failed to extract file {zipFilePath} to {inFolder}\n{ex.Message}");
+                throw;
+            }
+        }
+
         public static string AppDirForRelease(string rootAppDirectory, ReleaseEntry entry)
         {
             return Path.Combine(rootAppDirectory, "app-" + entry.Version.ToString());
+        }
+
+        public static string AppDirForVersion(string rootAppDirectory, SemanticVersion version)
+        {
+            return Path.Combine(rootAppDirectory, "app-" + version.ToString());
         }
 
         public static string PackageDirectoryForAppDir(string rootAppDirectory) 
@@ -377,7 +445,7 @@ namespace Squirrel
                 return null;
             }
 
-            return localReleases.MaxBy(x => x.Version).SingleOrDefault(x => !x.IsDelta);
+            return localReleases.OrderByDescending(x => x.Version).FirstOrDefault(x => !x.IsDelta);
         }
 
         static TAcc scan<T, TAcc>(this IEnumerable<T> This, TAcc initialValue, Func<TAcc, T, TAcc> accFunc)
@@ -402,6 +470,36 @@ namespace Squirrel
             return uri.Scheme == Uri.UriSchemeHttp || uri.Scheme == Uri.UriSchemeHttps;
         }
 
+        public static Uri AppendPathToUri(Uri uri, string path)
+        {
+            var builder = new UriBuilder(uri);
+            if (!builder.Path.EndsWith("/")) {
+                builder.Path += "/";
+            }
+
+            builder.Path += path;
+            return builder.Uri;
+        }
+
+        public static Uri EnsureTrailingSlash(Uri uri)
+        {
+            return AppendPathToUri(uri, "");
+        }
+
+        public static Uri AddQueryParamsToUri(Uri uri, IEnumerable<KeyValuePair<string, string>> newQuery)
+        {
+            var query = System.Web.HttpUtility.ParseQueryString(uri.Query);
+
+            foreach (var entry in newQuery) {
+                query[entry.Key] = entry.Value;
+            }
+
+            var builder = new UriBuilder(uri);
+            builder.Query = query.ToString();
+
+            return builder.Uri;
+        }
+
         public static void DeleteFileHarder(string path, bool ignoreIfFails = false)
         {
             try {
@@ -414,42 +512,61 @@ namespace Squirrel
             }
         }
 
-        public static async Task DeleteDirectoryWithFallbackToNextReboot(string dir)
+        public static async Task DeleteDirectoryOrJustGiveUp(string dir)
         {
             try {
                 await Utility.DeleteDirectory(dir);
-            } catch (Exception ex) {
-                var message = String.Format("Uninstall failed to delete dir '{0}', punting to next reboot", dir);
-                LogHost.Default.WarnException(message, ex);
-
-                Utility.DeleteDirectoryAtNextReboot(dir);
+            } catch {
+                var message = String.Format("Uninstall failed to delete dir '{0}'", dir);
             }
         }
 
-        public static void DeleteDirectoryAtNextReboot(string directoryPath)
+        // http://stackoverflow.com/questions/3111669/how-can-i-determine-the-subsystem-used-by-a-given-net-assembly
+        public static bool ExecutableUsesWin32Subsystem(string peImage)
         {
-            var di = new DirectoryInfo(directoryPath);
+            using (var s = new FileStream(peImage, FileMode.Open, FileAccess.Read)) {
+                var rawPeSignatureOffset = new byte[4];
+                s.Seek(0x3c, SeekOrigin.Begin);
+                s.Read(rawPeSignatureOffset, 0, 4);
 
-            if (!di.Exists) {
-                Log().Warn("DeleteDirectoryAtNextReboot: does not exist - {0}", directoryPath);
-                return;
+                int peSignatureOffset = rawPeSignatureOffset[0];
+                peSignatureOffset |= rawPeSignatureOffset[1] << 8;
+                peSignatureOffset |= rawPeSignatureOffset[2] << 16;
+                peSignatureOffset |= rawPeSignatureOffset[3] << 24;
+
+                var coffHeader = new byte[24];
+                s.Seek(peSignatureOffset, SeekOrigin.Begin);
+                s.Read(coffHeader, 0, 24);
+
+                byte[] signature = { (byte)'P', (byte)'E', (byte)'\0', (byte)'\0' };
+                for (int index = 0; index < 4; index++) {
+                    if (coffHeader[index] != signature[index]) throw new Exception("File is not a PE image");
+                }
+
+                var subsystemBytes = new byte[2];
+                s.Seek(68, SeekOrigin.Current);
+                s.Read(subsystemBytes, 0, 2);
+
+                int subSystem = subsystemBytes[0] | subsystemBytes[1] << 8;
+                return subSystem == 2; /*IMAGE_SUBSYSTEM_WINDOWS_GUI*/
             }
-
-            // NB: MoveFileEx blows up if you're a non-admin, so you always need a backup plan
-            di.GetFiles().ForEach(x => safeDeleteFileAtNextReboot(x.FullName));
-            di.GetDirectories().ForEach(x => DeleteDirectoryAtNextReboot(x.FullName));
-
-            safeDeleteFileAtNextReboot(directoryPath);
         }
 
-        static void safeDeleteFileAtNextReboot(string name)
+        readonly static string[] peExtensions = new[] { ".exe", ".dll", ".node" };
+        public static bool FileIsLikelyPEImage(string name)
         {
-            if (MoveFileEx(name, null, MoveFileFlags.MOVEFILE_DELAY_UNTIL_REBOOT)) return;
+            var ext = Path.GetExtension(name);
+            return peExtensions.Any(x => ext.Equals(x, StringComparison.OrdinalIgnoreCase));
+        }
 
-            // Thank You, http://www.pinvoke.net/default.aspx/coredll.getlasterror
-            var lastError = Marshal.GetLastWin32Error();
+        public static bool IsFileTopLevelInPackage(string fullName, string pkgPath)
+        {
+            var fn = fullName.ToLowerInvariant();
+            var pkg = pkgPath.ToLowerInvariant();
+            var relativePath = fn.Replace(pkg, "");
 
-            Log().Error("safeDeleteFileAtNextReboot: failed - {0} - {1}", name, lastError);
+            // NB: We want to match things like `/lib/net45/foo.exe` but not `/lib/net45/bar/foo.exe`
+            return relativePath.Split(Path.DirectorySeparatorChar).Length == 4;
         }
 
         public static void LogIfThrows(this IFullLogger This, LogLevel level, string message, Action block)
@@ -571,6 +688,124 @@ namespace Squirrel
             MOVEFILE_WRITE_THROUGH = 0x00000008,
             MOVEFILE_CREATE_HARDLINK = 0x00000010,
             MOVEFILE_FAIL_IF_NOT_TRACKABLE = 0x00000020
+        }
+
+        public static Guid CreateGuidFromHash(string text)
+        {
+            return CreateGuidFromHash(text, Utility.IsoOidNamespace);
+        }
+        public static Guid CreateGuidFromHash(byte[] data)
+        {
+            return CreateGuidFromHash(data, Utility.IsoOidNamespace);
+        }
+
+        public static Guid CreateGuidFromHash(string text, Guid namespaceId)
+        {
+            return CreateGuidFromHash(Encoding.UTF8.GetBytes(text), namespaceId);
+        }
+
+        public static Guid CreateGuidFromHash(byte[] nameBytes, Guid namespaceId)
+        {
+            // convert the namespace UUID to network order (step 3)
+            byte[] namespaceBytes = namespaceId.ToByteArray();
+            SwapByteOrder(namespaceBytes);
+
+            // comput the hash of the name space ID concatenated with the 
+            // name (step 4)
+            byte[] hash;
+            using (var algorithm = SHA1.Create()) {
+                algorithm.TransformBlock(namespaceBytes, 0, namespaceBytes.Length, null, 0);
+                algorithm.TransformFinalBlock(nameBytes, 0, nameBytes.Length);
+                hash = algorithm.Hash;
+            }
+
+            // most bytes from the hash are copied straight to the bytes of 
+            // the new GUID (steps 5-7, 9, 11-12)
+            var newGuid = new byte[16];
+            Array.Copy(hash, 0, newGuid, 0, 16);
+
+            // set the four most significant bits (bits 12 through 15) of 
+            // the time_hi_and_version field to the appropriate 4-bit 
+            // version number from Section 4.1.3 (step 8)
+            newGuid[6] = (byte)((newGuid[6] & 0x0F) | (5 << 4));
+
+            // set the two most significant bits (bits 6 and 7) of the 
+            // clock_seq_hi_and_reserved to zero and one, respectively 
+            // (step 10)
+            newGuid[8] = (byte)((newGuid[8] & 0x3F) | 0x80);
+
+            // convert the resulting UUID to local byte order (step 13)
+            SwapByteOrder(newGuid);
+            return new Guid(newGuid);
+        }
+
+        /// <summary>
+        /// The namespace for fully-qualified domain names (from RFC 4122, Appendix C).
+        /// </summary>
+        public static readonly Guid DnsNamespace = new Guid("6ba7b810-9dad-11d1-80b4-00c04fd430c8");
+
+        /// <summary>
+        /// The namespace for URLs (from RFC 4122, Appendix C).
+        /// </summary>
+        public static readonly Guid UrlNamespace = new Guid("6ba7b811-9dad-11d1-80b4-00c04fd430c8");
+
+        /// <summary>
+        /// The namespace for ISO OIDs (from RFC 4122, Appendix C).
+        /// </summary>
+        public static readonly Guid IsoOidNamespace = new Guid("6ba7b812-9dad-11d1-80b4-00c04fd430c8");
+
+        // Converts a GUID (expressed as a byte array) to/from network order (MSB-first).
+        static void SwapByteOrder(byte[] guid)
+        {
+            SwapBytes(guid, 0, 3);
+            SwapBytes(guid, 1, 2);
+            SwapBytes(guid, 4, 5);
+            SwapBytes(guid, 6, 7);
+        }
+
+        static void SwapBytes(byte[] guid, int left, int right)
+        {
+            byte temp = guid[left];
+            guid[left] = guid[right];
+            guid[right] = temp;
+        }
+    }
+
+    static unsafe class UnsafeUtility
+    {
+        public static List<Tuple<string, int>> EnumerateProcesses()
+        {
+            int bytesReturned = 0;
+            var pids = new int[2048];
+
+            fixed(int* p = pids) {
+                if (!NativeMethods.EnumProcesses((IntPtr)p, sizeof(int) * pids.Length, out bytesReturned)) {
+                    throw new Win32Exception("Failed to enumerate processes");
+                }
+
+                if (bytesReturned < 1) throw new Exception("Failed to enumerate processes");
+            }
+
+            return Enumerable.Range(0, bytesReturned / sizeof(int))
+                .Where(i => pids[i] > 0)
+                .Select(i => {
+                    try {
+                        var hProcess = NativeMethods.OpenProcess(ProcessAccess.QueryLimitedInformation, false, pids[i]);
+                        if (hProcess == IntPtr.Zero) throw new Win32Exception();
+
+                        var sb = new StringBuilder(256);
+                        var capacity = sb.Capacity;
+                        if (!NativeMethods.QueryFullProcessImageName(hProcess, 0, sb, ref capacity)) {
+                            throw new Win32Exception();
+                        }
+
+                        NativeMethods.CloseHandle(hProcess);
+                        return Tuple.Create(sb.ToString(), pids[i]);
+                    } catch (Exception) {
+                        return Tuple.Create(default(string), pids[i]);
+                    }
+                })
+                .ToList();
         }
     }
 

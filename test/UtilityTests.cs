@@ -131,6 +131,37 @@ namespace Squirrel.Tests.Core
             }
         }
 
+        [Theory]
+        [InlineData("foo.dll", true)]
+        [InlineData("foo.DlL", true)]
+        [InlineData("C:\\Foo\\Bar\\foo.Exe", true)]
+        [InlineData("Test.png", false)]
+        [InlineData(".rels", false)]
+        public void FileIsLikelyPEImageTest(string input, bool result)
+        {
+            Assert.Equal(result, Utility.FileIsLikelyPEImage(input));
+        }
+
+        [Theory]
+        [InlineData("C:\\Users\\bob\\temp\\pkgPath\\lib\\net45\\foo.exe", "C:\\Users\\bob\\temp\\pkgPath", true)]
+        [InlineData("C:\\Users\\bob\\temp\\pkgPath\\lib\\net45\\node_modules\\foo.exe", "C:\\Users\\bob\\temp\\pkgPath", false)]
+        [InlineData("C:\\Users\\bob\\temp\\pkgPath\\lib\\net45\\node_modules\\foo\\foo.exe", "C:\\Users\\bob\\temp\\pkgPath", false)]
+        [InlineData("foo.png", "C:\\Users\\bob\\temp\\pkgPath", false)]
+        public void IsFileTopLevelInPackageTest(string input, string packagePath, bool result)
+        {
+            Assert.Equal(result, Utility.IsFileTopLevelInPackage(input, packagePath));
+        }
+
+
+
+        [Fact]
+        public void WeCanFetchAllProcesses()
+        {
+            var result = UnsafeUtility.EnumerateProcesses();
+            Assert.True(result.Count > 1);
+            Assert.True(result.Count != 2048);
+        }
+
         static void CreateSampleDirectory(string directory)
         {
             Random prng = new Random();

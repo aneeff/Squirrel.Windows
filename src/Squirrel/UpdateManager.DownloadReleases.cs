@@ -40,6 +40,8 @@ namespace Squirrel
                                 progress((int)Math.Round(current += component));
                             }
                         });
+
+                        checksumPackage(x);
                     });
                 } else {
                     // From Disk
@@ -52,6 +54,7 @@ namespace Squirrel
                             true);
 
                         lock (progress) progress((int)Math.Round(current += toIncrement));
+                        checksumPackage(x);
                     });
                 }
             }
@@ -64,11 +67,13 @@ namespace Squirrel
 
             Task downloadRelease(string updateBaseUrl, ReleaseEntry releaseEntry, IFileDownloader urlDownloader, string targetFile, Action<int> progress)
             {
-                if (!updateBaseUrl.EndsWith("/")) {
-                    updateBaseUrl += '/';
-                }
+                var baseUri = Utility.EnsureTrailingSlash(new Uri(updateBaseUrl));
 
-                var sourceFileUrl = new Uri(new Uri(updateBaseUrl), releaseEntry.BaseUrl + releaseEntry.Filename).AbsoluteUri;
+                var releaseEntryUrl = releaseEntry.BaseUrl + releaseEntry.Filename;
+                if (!String.IsNullOrEmpty(releaseEntry.Query)) {
+                    releaseEntryUrl += releaseEntry.Query;
+                }
+                var sourceFileUrl = new Uri(baseUri, releaseEntryUrl).AbsoluteUri;
                 File.Delete(targetFile);
 
                 return urlDownloader.DownloadFile(sourceFileUrl, targetFile, progress);

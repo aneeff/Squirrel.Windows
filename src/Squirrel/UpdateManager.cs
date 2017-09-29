@@ -16,6 +16,7 @@ using System.Threading.Tasks;
 using Microsoft.Win32;
 using NuGet;
 using Splat;
+using Squirrel.Shell;
 
 namespace Squirrel
 {
@@ -88,6 +89,7 @@ namespace Squirrel
             var applyReleases = new ApplyReleasesImpl(rootAppDirectory);
             await acquireUpdateLock();
 
+            this.KillAllExecutablesBelongingToPackage();
             await applyReleases.FullUninstall();
         }
 
@@ -109,11 +111,18 @@ namespace Squirrel
             installHelpers.RemoveUninstallerRegistryEntry();
         }
 
-        public void CreateShortcutsForExecutable(string exeName, ShortcutLocation locations, bool updateOnly, string programArguments = null)
+        public void CreateShortcutsForExecutable(string exeName, ShortcutLocation locations, bool updateOnly, string programArguments = null, string icon = null)
         {
             var installHelpers = new ApplyReleasesImpl(rootAppDirectory);
-            installHelpers.CreateShortcutsForExecutable(exeName, locations, updateOnly, programArguments);
+            installHelpers.CreateShortcutsForExecutable(exeName, locations, updateOnly, programArguments, icon);
         }
+
+        public Dictionary<ShortcutLocation, ShellLink> GetShortcutsForExecutable(string exeName, ShortcutLocation locations, string programArguments = null)
+        {
+            var installHelpers = new ApplyReleasesImpl(rootAppDirectory);
+            return installHelpers.GetShortcutsForExecutable(exeName, locations, programArguments);
+        }
+
 
         public void RemoveShortcutsForExecutable(string exeName, ShortcutLocation locations)
         {
@@ -121,7 +130,7 @@ namespace Squirrel
             installHelpers.RemoveShortcutsForExecutable(exeName, locations);
         }
 
-        public Version CurrentlyInstalledVersion(string executable = null)
+        public SemanticVersion CurrentlyInstalledVersion(string executable = null)
         {
             executable = executable ??
                 Path.GetDirectoryName(typeof(UpdateManager).Assembly.Location);
@@ -134,7 +143,13 @@ namespace Squirrel
                 .FirstOrDefault(x => x.StartsWith("app-", StringComparison.OrdinalIgnoreCase));
 
             if (appDirName == null) return null;
-            return appDirName.ToVersion();
+            return appDirName.ToSemanticVersion();
+        }
+
+        public void KillAllExecutablesBelongingToPackage()
+        {
+            var installHelpers = new InstallHelperImpl(applicationName, rootAppDirectory);
+            installHelpers.KillAllProcessesBelongingToPackage();
         }
 
         public string ApplicationName {
@@ -185,6 +200,32 @@ namespace Squirrel
             // whatever WaitForInputIdle considers a message loop.
             Thread.Sleep(500);
             Environment.Exit(0);
+        }
+        
+        public static async Task<Process> RestartAppWhenExited(string exeToStart = null, string arguments = null)
+        { 
+            // NB: Here's how this method works:
+            //
+            // 1. We're going to pass the *name* of our EXE and the params to 
+            //    Update.exe
+            // 2. Update.exe is going to grab our PID (via getting its parent), 
+            //    then wait for us to exit.
+            // 3. Return control and new Process back to caller and allow them to Exit as desired.
+            // 4. After our process exits, Update.exe unblocks, then we launch the app again, possibly 
+            //    launching a different version than we started with (this is why
+            //    we take the app's *name* rather than a full path)
+
+            exeToStart = exeToStart ?? Path.GetFileName(Assembly.GetEntryAssembly().Location);
+            var argsArg = arguments != null ?
+                String.Format("-a \"{0}\"", arguments) : "";
+
+            exiting = true;
+
+            var updateProcess = Process.Start(getUpdateExe(), String.Format("--processStartAndWait {0} {1}", exeToStart, argsArg));
+
+            await Task.Delay(500);
+            
+            return updateProcess;
         }
 
         public static string GetLocalAppDataDirectory(string assemblyLocation = null)
@@ -264,7 +305,7 @@ namespace Squirrel
                 return Path.GetFullPath(assembly.Location);
             }
 
-            assembly = Assembly.GetExecutingAssembly();
+            assembly = Assembly.GetEntryAssembly() ?? Assembly.GetExecutingAssembly();
 
             var updateDotExe = Path.Combine(Path.GetDirectoryName(assembly.Location), "..\\Update.exe");
             var target = new FileInfo(updateDotExe);
